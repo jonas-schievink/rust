@@ -150,19 +150,15 @@ impl<'a, 'tcx> MarkSymbolVisitor<'a, 'tcx> {
 
     fn mark_live_symbols(&mut self) {
         let mut scanned = HashSet::new();
-        while !self.worklist.is_empty() {
-            let id = self.worklist.pop().unwrap();
+        while let Some(id) = self.worklist.pop() {
             if scanned.contains(&id) {
                 continue
             }
             scanned.insert(id);
 
-            match self.tcx.map.find(id) {
-                Some(ref node) => {
-                    self.live_symbols.insert(id);
-                    self.visit_node(node);
-                }
-                None => (),
+            if let Some(ref node) = self.tcx.map.find(id) {
+                self.live_symbols.insert(id);
+                self.visit_node(node);
             }
         }
     }
@@ -181,17 +177,21 @@ impl<'a, 'tcx> MarkSymbolVisitor<'a, 'tcx> {
                                 .contains(&attr::ReprExtern)
                         });
 
-                        intravisit::walk_item(self, &*item);
+                        intravisit::walk_item(self, &item);
                     }
                     hir::ItemEnum(..) => {
                         self.inherited_pub_visibility = item.vis == hir::Public;
-                        intravisit::walk_item(self, &*item);
+                        intravisit::walk_item(self, &item);
                     }
                     hir::ItemFn(..)
                     | hir::ItemTy(..)
                     | hir::ItemStatic(..)
                     | hir::ItemConst(..) => {
-                        intravisit::walk_item(self, &*item);
+                        intravisit::walk_item(self, &item);
+                    }
+                    hir::ItemImpl(_, _, _, Some(ref trait_ref), _, _) => {
+                        // If an impl of a trait is live, the trait is live, too
+                        self.worklist.push(trait_ref.ref_id);
                     }
                     _ => ()
                 }
@@ -203,7 +203,7 @@ impl<'a, 'tcx> MarkSymbolVisitor<'a, 'tcx> {
                 intravisit::walk_impl_item(self, impl_item);
             }
             ast_map::NodeForeignItem(foreign_item) => {
-                intravisit::walk_foreign_item(self, &*foreign_item);
+                intravisit::walk_foreign_item(self, &foreign_item);
             }
             _ => ()
         }
@@ -235,10 +235,10 @@ impl<'a, 'tcx, 'v> Visitor<'v> for MarkSymbolVisitor<'a, 'tcx> {
                 self.lookup_and_handle_method(expr.id);
             }
             hir::ExprField(ref lhs, ref name) => {
-                self.handle_field_access(&**lhs, name.node);
+                self.handle_field_access(&lhs, name.node);
             }
             hir::ExprTupField(ref lhs, idx) => {
-                self.handle_tup_field_access(&**lhs, idx.node);
+                self.handle_tup_field_access(&lhs, idx.node);
             }
             _ => ()
         }
@@ -248,14 +248,14 @@ impl<'a, 'tcx, 'v> Visitor<'v> for MarkSymbolVisitor<'a, 'tcx> {
 
     fn visit_arm(&mut self, arm: &hir::Arm) {
         if arm.pats.len() == 1 {
-            let pat = &*arm.pats[0];
+            let pat = &arm.pats[0];
             let variants = pat_util::necessary_variants(&self.tcx.def_map.borrow(), pat);
 
             // Inside the body, ignore constructions of variants
             // necessary for the pattern to match. Those construction sites
             // can't be reached unless the variant is constructed elsewhere.
             let len = self.ignore_variant_stack.len();
-            self.ignore_variant_stack.push_all(&*variants);
+            self.ignore_variant_stack.push_all(&variants);
             intravisit::walk_arm(self, arm);
             self.ignore_variant_stack.truncate(len);
         } else {
@@ -321,11 +321,13 @@ fn has_allow_dead_code_or_lang_attr(attrs: &[ast::Attribute]) -> bool {
 //   or
 //   2) We are not sure to be live or not
 //     * Implementation of a trait method
-struct LifeSeeder {
-    worklist: Vec<ast::NodeId>
+struct LifeSeeder<'a, 'tcx: 'a> {
+    tcx: &'a ty::ctxt<'tcx>,
+    access_levels: &'a privacy::AccessLevels,
+    worklist: Vec<ast::NodeId>,
 }
 
-impl<'v> Visitor<'v> for LifeSeeder {
+impl<'a, 'tcx, 'v> Visitor<'v> for LifeSeeder<'a, 'tcx> {
     fn visit_item(&mut self, item: &hir::Item) {
         let allow_dead_code = has_allow_dead_code_or_lang_attr(&item.attrs);
         if allow_dead_code {
@@ -349,7 +351,43 @@ impl<'v> Visitor<'v> for LifeSeeder {
                     }
                 }
             }
-            hir::ItemImpl(_, _, _, ref opt_trait, _, ref impl_items) => {
+            hir::ItemImpl(_, polarity, _, ref opt_trait, ref ty, ref impl_items) => {
+                if let Some(ref trait_ref) = *opt_trait {
+                    let trait_did = self.tcx.trait_ref_to_def_id(trait_ref);
+                    let trait_node_id = self.tcx.map.as_local_node_id(trait_did);
+
+                    // If it's a negative impl (`impl !Send for X`), assume it's live as well
+                    if polarity == hir::ImplPolarity::Negative {
+                        debug!("impl {:?} is negative -> live", item.id);
+                        self.worklist.push(item.id);
+                        if let Some(node) = trait_node_id {
+                            self.worklist.push(node);
+                        }
+                    }
+
+                    // If it's an impl that was used for a trait selection, it and its trait are
+                    // live.
+                    if self.tcx.used_impls.borrow().contains(&item.id) {
+                        debug!("impl {:?} used for selection -> live", item.id);
+                        self.worklist.push(item.id);
+                        if let Some(node) = trait_node_id {
+                            self.worklist.push(node);
+                        }
+                    } else {
+                        // If both the trait and type are reachable externally, the impl is live,
+                        // since it can be used by downstream crates
+                        let trait_reachable = match trait_node_id {
+                            None => true,   // external trait, always reachable
+                            Some(node) => self.access_levels.is_reachable(node),
+                        };
+                        if trait_reachable && self.access_levels.is_reachable(ty.id) {
+                            debug!("impl {:?} live, since trait {:?} ({:?}) and type {:?} live",
+                                item.id, trait_node_id, trait_ref, ty);
+                            self.worklist.push(item.id);
+                        }
+                    }
+                }
+
                 for impl_item in impl_items {
                     match impl_item.node {
                         hir::ImplItemKind::Const(..) |
@@ -384,7 +422,9 @@ fn create_and_seed_worklist(tcx: &ty::ctxt,
 
     // Seed implemented trait items
     let mut life_seeder = LifeSeeder {
-        worklist: worklist
+        tcx: tcx,
+        access_levels: access_levels,
+        worklist: worklist,
     };
     krate.visit_all_items(&mut life_seeder);
 
@@ -422,6 +462,8 @@ impl<'a, 'tcx> DeadVisitor<'a, 'tcx> {
             | hir::ItemConst(..)
             | hir::ItemFn(..)
             | hir::ItemEnum(..)
+            | hir::ItemImpl(_, _, _, Some(_), _, _)
+            | hir::ItemTrait(..)
             | hir::ItemStruct(..) => true,
             _ => false
         };
@@ -465,21 +507,21 @@ impl<'a, 'tcx> DeadVisitor<'a, 'tcx> {
                              |ctor| self.live_symbols.contains(&ctor)) {
             return true;
         }
+
+        let impl_items = self.tcx.impl_items.borrow();
+        let did = self.tcx.map.local_def_id(id);
+
         // If it's a type whose items are live, then it's live, too.
         // This is done to handle the case where, for example, the static
         // method of a private type is used, but the type itself is never
         // called directly.
-        let impl_items = self.tcx.impl_items.borrow();
-        match self.tcx.inherent_impls.borrow().get(&self.tcx.map.local_def_id(id)) {
-            None => (),
-            Some(impl_list) => {
-                for impl_did in impl_list.iter() {
-                    for item_did in impl_items.get(impl_did).unwrap().iter() {
-                        if let Some(item_node_id) =
-                                self.tcx.map.as_local_node_id(item_did.def_id()) {
-                            if self.live_symbols.contains(&item_node_id) {
-                                return true;
-                            }
+        if let Some(impl_list) = self.tcx.inherent_impls.borrow().get(&did) {
+            for impl_did in impl_list.iter() {
+                for item_did in impl_items.get(impl_did).unwrap().iter() {
+                    if let Some(item_node_id) =
+                            self.tcx.map.as_local_node_id(item_did.def_id()) {
+                        if self.live_symbols.contains(&item_node_id) {
+                            return true;
                         }
                     }
                 }
@@ -491,17 +533,16 @@ impl<'a, 'tcx> DeadVisitor<'a, 'tcx> {
     fn warn_dead_code(&mut self,
                       id: ast::NodeId,
                       span: codemap::Span,
-                      name: ast::Name,
+                      name: Option<ast::Name>,
                       node_type: &str) {
-        let name = name.as_str();
-        if !name.starts_with("_") {
-            self.tcx
-                .sess
-                .add_lint(lint::builtin::DEAD_CODE,
-                          id,
-                          span,
-                          format!("{} is never used: `{}`", node_type, name));
-        }
+        let message = match name.map(|name| name.as_str()) {
+            None => format!("{} is never used", node_type),
+            Some(name) => {
+                if name.starts_with("_") { return }
+                format!("{} is never used: `{}`", node_type, name)
+            }
+        };
+        self.tcx.sess.add_lint(lint::builtin::DEAD_CODE, id, span, message);
     }
 }
 
@@ -516,10 +557,15 @@ impl<'a, 'tcx, 'v> Visitor<'v> for DeadVisitor<'a, 'tcx> {
 
     fn visit_item(&mut self, item: &hir::Item) {
         if self.should_warn_about_item(item) {
+            let name = match item.node {
+                // `impl`s have ugly names, so we just print "item is never used"
+                hir::ItemImpl(..) => None,
+                _ => Some(item.name),
+            };
             self.warn_dead_code(
                 item.id,
                 item.span,
-                item.name,
+                name,
                 item.node.descriptive_variant()
             );
         } else {
@@ -531,7 +577,7 @@ impl<'a, 'tcx, 'v> Visitor<'v> for DeadVisitor<'a, 'tcx> {
     fn visit_variant(&mut self, variant: &hir::Variant, g: &hir::Generics, id: ast::NodeId) {
         if self.should_warn_about_variant(&variant.node) {
             self.warn_dead_code(variant.node.data.id(), variant.span,
-                                variant.node.name, "variant");
+                                Some(variant.node.name), "variant");
         } else {
             intravisit::walk_variant(self, variant, g, id);
         }
@@ -539,7 +585,7 @@ impl<'a, 'tcx, 'v> Visitor<'v> for DeadVisitor<'a, 'tcx> {
 
     fn visit_foreign_item(&mut self, fi: &hir::ForeignItem) {
         if !self.symbol_is_live(fi.id, None) {
-            self.warn_dead_code(fi.id, fi.span, fi.name, fi.node.descriptive_variant());
+            self.warn_dead_code(fi.id, fi.span, Some(fi.name), fi.node.descriptive_variant());
         }
         intravisit::walk_foreign_item(self, fi);
     }
@@ -547,7 +593,7 @@ impl<'a, 'tcx, 'v> Visitor<'v> for DeadVisitor<'a, 'tcx> {
     fn visit_struct_field(&mut self, field: &hir::StructField) {
         if self.should_warn_about_field(&field.node) {
             self.warn_dead_code(field.node.id, field.span,
-                                field.node.name().unwrap(), "struct field");
+                                field.node.name(), "struct field");
         }
 
         intravisit::walk_struct_field(self, field);
@@ -558,14 +604,14 @@ impl<'a, 'tcx, 'v> Visitor<'v> for DeadVisitor<'a, 'tcx> {
             hir::ImplItemKind::Const(_, ref expr) => {
                 if !self.symbol_is_live(impl_item.id, None) {
                     self.warn_dead_code(impl_item.id, impl_item.span,
-                                        impl_item.name, "associated const");
+                                        Some(impl_item.name), "associated const");
                 }
                 intravisit::walk_expr(self, expr)
             }
             hir::ImplItemKind::Method(_, ref body) => {
                 if !self.symbol_is_live(impl_item.id, None) {
                     self.warn_dead_code(impl_item.id, impl_item.span,
-                                        impl_item.name, "method");
+                                        Some(impl_item.name), "method");
                 }
                 intravisit::walk_block(self, body)
             }

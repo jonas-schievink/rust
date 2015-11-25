@@ -704,14 +704,14 @@ impl<'a, K: 'a, V: 'a> Handle<&'a mut Node<K, V>, handle::Edge, handle::Internal
     }
 }
 
-impl<K, V, NodeRef: Deref<Target=Node<K, V>>> Handle<NodeRef, handle::Edge, handle::Internal> {
-    // This doesn't exist because there are no uses for it,
-    // but is fine to add, analogous to edge_mut.
-    //
-    // /// Returns a reference to the edge pointed-to by this handle. This should not be
-    // /// confused with `node`, which references the parent node of what is returned here.
-    // pub fn edge(&self) -> &Node<K, V>
-}
+// This doesn't exist because there are no uses for it,
+// but is fine to add, analogous to edge_mut.
+// impl<K, V, NodeRef: Deref<Target=Node<K, V>>> Handle<NodeRef, handle::Edge, handle::Internal> {
+//
+//     /// Returns a reference to the edge pointed-to by this handle. This should not be
+//     /// confused with `node`, which references the parent node of what is returned here.
+//     pub fn edge(&self) -> &Node<K, V>
+// }
 
 pub enum ForceResult<NodeRef, Type> {
     Leaf(Handle<NodeRef, Type, handle::Leaf>),
@@ -923,24 +923,23 @@ impl<'a, K: 'a, V: 'a, NodeType> Handle<&'a mut Node<K, V>, handle::KV, NodeType
     }
 }
 
-impl<'a, K: 'a, V: 'a, NodeRef: Deref<Target=Node<K, V>> + 'a, NodeType> Handle<NodeRef, handle::KV,
-                                                                         NodeType> {
-    // These are fine to include, but are currently unneeded.
-    //
-    // /// Returns a reference to the key pointed-to by this handle. This doesn't return a
-    // /// reference with a lifetime as large as `into_kv_mut`, but it also does not consume the
-    // /// handle.
-    // pub fn key(&'a self) -> &'a K {
-    //     unsafe { self.node.keys().get_unchecked(self.index) }
-    // }
-    //
-    // /// Returns a reference to the value pointed-to by this handle. This doesn't return a
-    // /// reference with a lifetime as large as `into_kv_mut`, but it also does not consume the
-    // /// handle.
-    // pub fn val(&'a self) -> &'a V {
-    //     unsafe { self.node.vals().get_unchecked(self.index) }
-    // }
-}
+// These are fine to include, but are currently unneeded.
+// impl<'a, K: 'a, V: 'a, NodeRef: Deref<Target=Node<K, V>> + 'a, NodeType>
+//         Handle<NodeRef, handle::KV, NodeType> {
+//     /// Returns a reference to the key pointed-to by this handle. This doesn't return a
+//     /// reference with a lifetime as large as `into_kv_mut`, but it also does not consume the
+//     /// handle.
+//     pub fn key(&'a self) -> &'a K {
+//         unsafe { self.node.keys().get_unchecked(self.index) }
+//     }
+//
+//     /// Returns a reference to the value pointed-to by this handle. This doesn't return a
+//     /// reference with a lifetime as large as `into_kv_mut`, but it also does not consume the
+//     /// handle.
+//     pub fn val(&'a self) -> &'a V {
+//         unsafe { self.node.vals().get_unchecked(self.index) }
+//     }
+// }
 
 impl<'a, K: 'a, V: 'a, NodeRef, NodeType> Handle<NodeRef, handle::KV, NodeType> where
     NodeRef: 'a + Deref<Target=Node<K, V>> + DerefMut,

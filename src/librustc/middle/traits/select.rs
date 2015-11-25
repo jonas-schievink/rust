@@ -795,7 +795,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         //
         //     impl<T:Clone> Vec<T> { fn push_clone(...) { ... } }
         //
-        // and we were to see some code `foo.push_clone()` where `boo`
+        // and we were to see some code `foo.push_clone()` where `foo`
         // is a `Vec<Bar>` and `Bar` does not implement `Clone`.  If
         // we were to winnow, we'd wind up with zero candidates.
         // Instead, we select the right impl now but report `Bar does
@@ -2241,8 +2241,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                               -> Result<VtableImplData<'tcx, PredicateObligation<'tcx>>,
                                         SelectionError<'tcx>>
     {
-        debug!("confirm_impl_candidate({:?},{:?})",
+        debug!("confirm_impl_candidate({:?},{:?},{:?})",
                obligation,
+               obligation.cause,
                impl_def_id);
 
         // First, create the substitutions by matching the impl again,
@@ -2252,6 +2253,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 self.rematch_impl(impl_def_id, obligation,
                                   snapshot);
             debug!("confirm_impl_candidate substs={:?}", substs);
+
+            if let Some(node_id) = self.infcx.tcx.map.as_local_node_id(impl_def_id) {
+                self.infcx.tcx.used_impls.borrow_mut().insert(node_id);
+            }
+
             Ok(self.vtable_impl(impl_def_id, substs, obligation.cause.clone(),
                                 obligation.recursion_depth + 1, skol_map, snapshot))
         })

@@ -306,6 +306,9 @@ pub struct ctxt<'tcx> {
     /// about.
     pub used_mut_nodes: RefCell<NodeSet>,
 
+    /// Set of crate-local `impl` blocks that were used for trait selection.
+    pub used_impls: RefCell<NodeSet>,
+
     /// The set of external nominal types whose implementations have been read.
     /// This is used for lazy resolution of methods.
     pub populated_external_types: RefCell<DefIdSet>,
@@ -509,6 +512,7 @@ impl<'tcx> ctxt<'tcx> {
             impl_items: RefCell::new(DefIdMap()),
             used_unsafe: RefCell::new(NodeSet()),
             used_mut_nodes: RefCell::new(NodeSet()),
+            used_impls: RefCell::new(NodeSet()),
             populated_external_types: RefCell::new(DefIdSet()),
             populated_external_primitive_impls: RefCell::new(DefIdSet()),
             extern_const_statics: RefCell::new(DefIdMap()),
