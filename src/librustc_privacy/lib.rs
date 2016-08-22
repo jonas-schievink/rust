@@ -22,6 +22,7 @@
 #![feature(staged_api)]
 
 extern crate rustc;
+#[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
 extern crate syntax_pos;
 
@@ -1130,6 +1131,13 @@ pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             old_error_set: &visitor.old_error_set,
         };
         krate.visit_all_items(&mut visitor);
+    }
+
+    for (node_id, access_level) in &visitor.access_levels.map {
+        debug!("[{}] {} -> {:?}",
+               node_id,
+               tcx.node_path_str(*node_id),
+               access_level);
     }
 
     visitor.access_levels
