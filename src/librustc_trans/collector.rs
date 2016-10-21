@@ -269,130 +269,150 @@ impl<'tcx> InliningMap<'tcx> {
     }
 }
 
-pub fn collect_crate_translation_items<'a, 'tcx>(scx: &SharedCrateContext<'a, 'tcx>,
-                                                 mode: TransItemCollectionMode)
-                                                 -> (FnvHashSet<TransItem<'tcx>>,
-                                                     InliningMap<'tcx>) {
-    // We are not tracking dependencies of this pass as it has to be re-executed
-    // every time no matter what.
-    scx.tcx().dep_graph.with_ignore(|| {
-        let roots = collect_roots(scx, mode);
-
-        debug!("Building translation item graph, beginning at roots");
-        let mut visited = FnvHashSet();
-        let mut recursion_depths = DefIdMap();
-        let mut inlining_map = InliningMap::new();
-
-        for root in roots {
-            collect_items_rec(scx,
-                              root,
-                              &mut visited,
-                              &mut recursion_depths,
-                              &mut inlining_map);
-        }
-
-        (visited, inlining_map)
-    })
+pub struct CollectionResult<'tcx> {
+    pub items: FnvHashSet<TransItem<'tcx>>,
+    pub inlining_map: InliningMap<'tcx>,
 }
 
-// Find all non-generic items by walking the HIR. These items serve as roots to
-// start monomorphizing from.
-fn collect_roots<'a, 'tcx>(scx: &SharedCrateContext<'a, 'tcx>,
-                           mode: TransItemCollectionMode)
-                           -> Vec<TransItem<'tcx>> {
-    debug!("Collecting roots");
-    let mut roots = Vec::new();
+struct Collector<'a, 'tcx: 'a> {
+    scx: &'a SharedCrateContext<'a, 'tcx>,
+    mode: TransItemCollectionMode,
+    visited: FnvHashSet<TransItem<'tcx>>,
+    recursion_depths: DefIdMap<usize>,
+    inlining_map: InliningMap<'tcx>,
+}
 
-    {
-        let mut visitor = RootCollector {
+impl<'a, 'tcx> Collector<'a, 'tcx> {
+    fn new(scx: &'a SharedCrateContext<'a, 'tcx>, mode: TransItemCollectionMode) -> Self {
+        Collector {
             scx: scx,
             mode: mode,
-            output: &mut roots,
-            enclosing_item: None,
-        };
-
-        scx.tcx().map.krate().visit_all_items(&mut visitor);
+            visited: FnvHashSet(),
+            recursion_depths: DefIdMap(),
+            inlining_map: InliningMap::new(),
+        }
     }
 
-    roots
+    fn collect(mut self) -> CollectionResult<'tcx> {
+        // We are not tracking dependencies of this pass as it has to be re-executed
+        // every time no matter what.
+        self.scx.tcx().dep_graph.with_ignore(move || {
+            let roots = self.collect_roots();
+
+            debug!("Building translation item graph, beginning at roots");
+
+            for root in roots {
+                self.collect_items_rec(root);
+            }
+
+            CollectionResult {
+                items: self.visited,
+                inlining_map: self.inlining_map,
+            }
+        })
+    }
+
+    // Find all non-generic items by walking the HIR. These items serve as roots to
+    // start monomorphizing from.
+    fn collect_roots(&self) -> Vec<TransItem<'tcx>> {
+        debug!("Collecting roots");
+        let mut roots = Vec::new();
+
+        {
+            let mut visitor = RootCollector {
+                scx: self.scx,
+                mode: self.mode,
+                output: &mut roots,
+                enclosing_item: None,
+            };
+
+            self.scx.tcx().map.krate().visit_all_items(&mut visitor);
+        }
+
+        roots
+    }
+
+    // Collect all monomorphized translation items reachable from `starting_point`
+    fn collect_items_rec(&mut self, starting_point: TransItem<'tcx>) {
+        if !self.visited.insert(starting_point.clone()) {
+            // We've been here already, no need to search again.
+            return;
+        }
+
+        debug!("BEGIN collect_items_rec({})", starting_point.to_string(self.scx.tcx()));
+
+        let scx = self.scx;
+        let mut neighbors = Vec::new();
+        let recursion_depth_reset;
+
+        match starting_point {
+            TransItem::DropGlue(t) => {
+                find_drop_glue_neighbors(scx, t, &mut neighbors);
+                recursion_depth_reset = None;
+            }
+            TransItem::Static(node_id) => {
+                let def_id = scx.tcx().map.local_def_id(node_id);
+                let ty = scx.tcx().lookup_item_type(def_id).ty;
+                let ty = glue::get_drop_glue_type(scx.tcx(), ty);
+                neighbors.push(TransItem::DropGlue(DropGlueKind::Ty(ty)));
+
+                recursion_depth_reset = None;
+
+                // Scan the MIR in order to find function calls, closures, and
+                // drop-glue
+                let mir = errors::expect(scx.sess().diagnostic(), scx.get_mir(def_id),
+                    || format!("Could not find MIR for static: {:?}", def_id));
+
+                let empty_substs = scx.empty_substs_for_def_id(def_id);
+                let visitor = MirNeighborCollector {
+                    scx: scx,
+                    mir: &mir,
+                    output: &mut neighbors,
+                    param_substs: empty_substs
+                };
+
+                visit_mir_and_promoted(visitor, &mir);
+            }
+            TransItem::Fn(instance) => {
+                // Keep track of the monomorphization recursion depth
+                recursion_depth_reset = Some(check_recursion_limit(scx.tcx(),
+                                                                   instance,
+                                                                   &mut self.recursion_depths));
+
+                // Scan the MIR in order to find function calls, closures, and
+                // drop-glue
+                let mir = errors::expect(scx.sess().diagnostic(), scx.get_mir(instance.def),
+                    || format!("Could not find MIR for function: {}", instance));
+
+                let visitor = MirNeighborCollector {
+                    scx: scx,
+                    mir: &mir,
+                    output: &mut neighbors,
+                    param_substs: instance.substs
+                };
+
+                visit_mir_and_promoted(visitor, &mir);
+            }
+        }
+
+        record_inlining_canditates(scx.tcx(), starting_point, &neighbors[..], &mut self.inlining_map);
+
+        for neighbour in neighbors {
+            self.collect_items_rec(neighbour);
+        }
+
+        if let Some((def_id, depth)) = recursion_depth_reset {
+            self.recursion_depths.insert(def_id, depth);
+        }
+
+        debug!("END collect_items_rec({})", starting_point.to_string(scx.tcx()));
+    }
 }
 
-// Collect all monomorphized translation items reachable from `starting_point`
-fn collect_items_rec<'a, 'tcx: 'a>(scx: &SharedCrateContext<'a, 'tcx>,
-                                   starting_point: TransItem<'tcx>,
-                                   visited: &mut FnvHashSet<TransItem<'tcx>>,
-                                   recursion_depths: &mut DefIdMap<usize>,
-                                   inlining_map: &mut InliningMap<'tcx>) {
-    if !visited.insert(starting_point.clone()) {
-        // We've been here already, no need to search again.
-        return;
-    }
-    debug!("BEGIN collect_items_rec({})", starting_point.to_string(scx.tcx()));
-
-    let mut neighbors = Vec::new();
-    let recursion_depth_reset;
-
-    match starting_point {
-        TransItem::DropGlue(t) => {
-            find_drop_glue_neighbors(scx, t, &mut neighbors);
-            recursion_depth_reset = None;
-        }
-        TransItem::Static(node_id) => {
-            let def_id = scx.tcx().map.local_def_id(node_id);
-            let ty = scx.tcx().lookup_item_type(def_id).ty;
-            let ty = glue::get_drop_glue_type(scx.tcx(), ty);
-            neighbors.push(TransItem::DropGlue(DropGlueKind::Ty(ty)));
-
-            recursion_depth_reset = None;
-
-            // Scan the MIR in order to find function calls, closures, and
-            // drop-glue
-            let mir = errors::expect(scx.sess().diagnostic(), scx.get_mir(def_id),
-                || format!("Could not find MIR for static: {:?}", def_id));
-
-            let empty_substs = scx.empty_substs_for_def_id(def_id);
-            let visitor = MirNeighborCollector {
-                scx: scx,
-                mir: &mir,
-                output: &mut neighbors,
-                param_substs: empty_substs
-            };
-
-            visit_mir_and_promoted(visitor, &mir);
-        }
-        TransItem::Fn(instance) => {
-            // Keep track of the monomorphization recursion depth
-            recursion_depth_reset = Some(check_recursion_limit(scx.tcx(),
-                                                               instance,
-                                                               recursion_depths));
-
-            // Scan the MIR in order to find function calls, closures, and
-            // drop-glue
-            let mir = errors::expect(scx.sess().diagnostic(), scx.get_mir(instance.def),
-                || format!("Could not find MIR for function: {}", instance));
-
-            let visitor = MirNeighborCollector {
-                scx: scx,
-                mir: &mir,
-                output: &mut neighbors,
-                param_substs: instance.substs
-            };
-
-            visit_mir_and_promoted(visitor, &mir);
-        }
-    }
-
-    record_inlining_canditates(scx.tcx(), starting_point, &neighbors[..], inlining_map);
-
-    for neighbour in neighbors {
-        collect_items_rec(scx, neighbour, visited, recursion_depths, inlining_map);
-    }
-
-    if let Some((def_id, depth)) = recursion_depth_reset {
-        recursion_depths.insert(def_id, depth);
-    }
-
-    debug!("END collect_items_rec({})", starting_point.to_string(scx.tcx()));
+pub fn collect_crate_translation_items<'a, 'tcx>(scx: &SharedCrateContext<'a, 'tcx>,
+                                                 mode: TransItemCollectionMode)
+                                                 -> CollectionResult<'tcx> {
+    Collector::new(scx, mode).collect()
 }
 
 fn record_inlining_canditates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,

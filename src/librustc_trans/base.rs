@@ -1806,7 +1806,7 @@ fn collect_and_partition_translation_items<'a, 'tcx>(scx: &SharedCrateContext<'a
         None => TransItemCollectionMode::Lazy
     };
 
-    let (items, inlining_map) =
+    let collector::CollectionResult { items, inlining_map } =
         time(time_passes, "translation item collection", || {
             collector::collect_crate_translation_items(&scx, collection_mode)
     });
