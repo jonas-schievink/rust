@@ -215,6 +215,8 @@ use glue::{self, DropGlueKind};
 use monomorphize::{self, Instance};
 use util::nodemap::{FnvHashSet, FnvHashMap, DefIdMap};
 
+use std::collections::VecDeque;
+
 use trans_item::{TransItem, type_to_string, def_id_to_string};
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -280,6 +282,7 @@ struct Collector<'a, 'tcx: 'a> {
     visited: FnvHashSet<TransItem<'tcx>>,
     recursion_depths: DefIdMap<usize>,
     inlining_map: InliningMap<'tcx>,
+    worklist: VecDeque<TransItem<'tcx>>,
 }
 
 impl<'a, 'tcx> Collector<'a, 'tcx> {
@@ -290,6 +293,7 @@ impl<'a, 'tcx> Collector<'a, 'tcx> {
             visited: FnvHashSet(),
             recursion_depths: DefIdMap(),
             inlining_map: InliningMap::new(),
+            worklist: VecDeque::new(),
         }
     }
 
@@ -297,12 +301,12 @@ impl<'a, 'tcx> Collector<'a, 'tcx> {
         // We are not tracking dependencies of this pass as it has to be re-executed
         // every time no matter what.
         self.scx.tcx().dep_graph.with_ignore(move || {
-            let roots = self.collect_roots();
+            self.worklist = self.collect_roots().into();
 
             debug!("Building translation item graph, beginning at roots");
 
-            for root in roots {
-                self.collect_items_rec(root);
+            while let Some(item) = self.worklist.pop_front() {
+                self.collect_items_rec(item);
             }
 
             CollectionResult {
@@ -395,15 +399,16 @@ impl<'a, 'tcx> Collector<'a, 'tcx> {
             }
         }
 
-        record_inlining_canditates(scx.tcx(), starting_point, &neighbors[..], &mut self.inlining_map);
-
-        for neighbour in neighbors {
-            self.collect_items_rec(neighbour);
-        }
+        record_inlining_canditates(scx.tcx(),
+                                   starting_point,
+                                   &neighbors[..],
+                                   &mut self.inlining_map);
 
         if let Some((def_id, depth)) = recursion_depth_reset {
             self.recursion_depths.insert(def_id, depth);
         }
+
+        self.worklist.extend(neighbors);
 
         debug!("END collect_items_rec({})", starting_point.to_string(scx.tcx()));
     }
