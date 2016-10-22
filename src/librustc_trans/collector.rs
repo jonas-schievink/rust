@@ -282,7 +282,8 @@ struct Collector<'a, 'tcx: 'a> {
     visited: FnvHashSet<TransItem<'tcx>>,
     recursion_depths: DefIdMap<usize>,
     inlining_map: InliningMap<'tcx>,
-    worklist: VecDeque<TransItem<'tcx>>,
+    /// List of `TransItem`s we need to walk. The `usize` is the recursion depth.
+    worklist: VecDeque<(TransItem<'tcx>, usize)>,
 }
 
 impl<'a, 'tcx> Collector<'a, 'tcx> {
@@ -301,12 +302,12 @@ impl<'a, 'tcx> Collector<'a, 'tcx> {
         // We are not tracking dependencies of this pass as it has to be re-executed
         // every time no matter what.
         self.scx.tcx().dep_graph.with_ignore(move || {
-            self.worklist = self.collect_roots().into();
+            self.worklist = self.collect_roots().into_iter().map(|item| (item, 0)).collect();
 
             debug!("Building translation item graph, beginning at roots");
 
-            while let Some(item) = self.worklist.pop_front() {
-                self.collect_items_rec(item);
+            while let Some((item, depth)) = self.worklist.pop_front() {
+                self.collect_items_rec(item, depth);
             }
 
             CollectionResult {
@@ -337,13 +338,13 @@ impl<'a, 'tcx> Collector<'a, 'tcx> {
     }
 
     // Collect all monomorphized translation items reachable from `starting_point`
-    fn collect_items_rec(&mut self, starting_point: TransItem<'tcx>) {
+    fn collect_items_rec(&mut self, starting_point: TransItem<'tcx>, mut depth: usize) {
         if !self.visited.insert(starting_point.clone()) {
             // We've been here already, no need to search again.
             return;
         }
 
-        debug!("BEGIN collect_items_rec({})", starting_point.to_string(self.scx.tcx()));
+        debug!("BEGIN collect_items_rec({}, {})", starting_point.to_string(self.scx.tcx()), depth);
 
         let scx = self.scx;
         let mut neighbors = Vec::new();
@@ -378,10 +379,26 @@ impl<'a, 'tcx> Collector<'a, 'tcx> {
                 visit_mir_and_promoted(visitor, &mir);
             }
             TransItem::Fn(instance) => {
+                // Code that needs to instantiate the same function recursively
+                // more than the recursion limit is assumed to be causing an
+                // infinite expansion.
+                if depth > self.scx.tcx().sess.recursion_limit.get() {
+                    let tcx = self.scx.tcx();
+                    let error = format!("reached the recursion limit while instantiating `{}`",
+                                        instance);
+                    if let Some(node_id) = tcx.map.as_local_node_id(instance.def) {
+                        tcx.sess.span_fatal(tcx.map.span(node_id), &error);
+                    } else {
+                        tcx.sess.fatal(&error);
+                    }
+                }
+
                 // Keep track of the monomorphization recursion depth
                 recursion_depth_reset = Some(check_recursion_limit(scx.tcx(),
                                                                    instance,
                                                                    &mut self.recursion_depths));
+
+                depth += 1;
 
                 // Scan the MIR in order to find function calls, closures, and
                 // drop-glue
@@ -408,7 +425,7 @@ impl<'a, 'tcx> Collector<'a, 'tcx> {
             self.recursion_depths.insert(def_id, depth);
         }
 
-        self.worklist.extend(neighbors);
+        self.worklist.extend(neighbors.into_iter().map(|item| (item, depth)));
 
         debug!("END collect_items_rec({})", starting_point.to_string(scx.tcx()));
     }
