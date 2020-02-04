@@ -1471,13 +1471,11 @@ fn assoc_ty_def(
     // If there is no such item in that impl, this function will fail with a
     // cycle error if the specialization graph is currently being built.
     let impl_node = specialization_graph::Node::Impl(impl_def_id);
-    for item in impl_node.items(tcx) {
-        if matches!(item.kind, ty::AssocKind::Type | ty::AssocKind::OpaqueTy)
-            && tcx.hygienic_eq(item.ident, assoc_ty_name, trait_def_id)
-        {
+    for item in impl_node.items(tcx).by_name(assoc_ty_name.name).concrete_and_opaque_types() {
+        if tcx.hygienic_eq(item.ident, assoc_ty_name, trait_def_id) {
             return specialization_graph::NodeItem {
                 node: specialization_graph::Node::Impl(impl_def_id),
-                item,
+                item: *item,
             };
         }
     }

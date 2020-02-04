@@ -2705,12 +2705,13 @@ impl<'tcx> TyCtxt<'tcx> {
 
     pub fn provided_trait_methods(self, id: DefId) -> Vec<AssocItem> {
         self.associated_items(id)
+            .iter()
             .filter(|item| item.kind == AssocKind::Method && item.defaultness.has_value())
             .collect()
     }
 
     pub fn trait_relevant_for_never(self, did: DefId) -> bool {
-        self.associated_items(did).any(|item| item.relevant_for_never())
+        self.associated_items(did).iter().any(|item| item.relevant_for_never())
     }
 
     pub fn opt_item_name(self, def_id: DefId) -> Option<Ident> {
@@ -2739,19 +2740,6 @@ impl<'tcx> TyCtxt<'tcx> {
 
     pub fn find_field_index(self, ident: Ident, variant: &VariantDef) -> Option<usize> {
         variant.fields.iter().position(|field| self.hygienic_eq(ident, field.ident, variant.def_id))
-    }
-
-    pub fn associated_items(self, def_id: DefId) -> AssocItemsIterator<'tcx> {
-        // Ideally, we would use `-> impl Iterator` here, but it falls
-        // afoul of the conservative "capture [restrictions]" we put
-        // in place, so we use a hand-written iterator.
-        //
-        // [restrictions]: https://github.com/rust-lang/rust/issues/34511#issuecomment-373423999
-        AssocItemsIterator {
-            tcx: self,
-            def_ids: self.associated_item_def_ids(def_id),
-            next_index: 0,
-        }
     }
 
     /// Returns `true` if the impls are the same polarity and the trait either
@@ -2990,6 +2978,61 @@ impl<'tcx> TyCtxt<'tcx> {
             None => self.hir().get_module_parent(block),
         };
         (ident, scope)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct AssocItems<'tcx> {
+    items: &'tcx [AssocItem],
+}
+
+impl<'tcx> AssocItems<'tcx> {
+    /// Use `tcx.associated_items(def_id)` instead.
+    pub fn compute(tcx: TyCtxt<'tcx>, def_id: DefId) -> &'tcx Self {
+        let mut items: Vec<_> = tcx
+            .associated_item_def_ids(def_id)
+            .iter()
+            .map(|did| tcx.associated_item(did))
+            .collect();
+        items.sort_by_key(|item| item.name);
+
+        Self { items: tcx.arena.alloc_from_iter(items) }
+    }
+
+    pub fn by_name(&self, name: Symbol) -> Self {
+        match self.items.binary_search_by_key(name, |item| item.name) {
+            Ok(index) => {
+                let items = &self.items[index..];
+                let end = (1..items.len()).find(|i| items[i] != name).unwrap_or(items.len());
+                Self { items: &items[..end] }
+            }
+            Err(_) => Self { items: &[] },
+        }
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &AssocItem> {
+        self.items.iter()
+    }
+
+    #[inline]
+    pub fn methods(&self) -> impl Iterator<Item = &AssocItem> {
+        self.items.iter().filter(|item| item.kind == AssocKind::Method)
+    }
+
+    #[inline]
+    pub fn consts(&self) -> impl Iterator<Item = &AssocItem> {
+        self.items.iter().filter(|item| item.kind == AssocKind::Const)
+    }
+
+    #[inline]
+    pub fn concrete_types(&self) -> impl Iterator<Item = &AssocItem> {
+        self.items.iter().filter(|item| item.kind == AssocKind::Type)
+    }
+
+    #[inline]
+    pub fn concrete_and_opaque_types(&self) -> impl Iterator<Item = &AssocItem> {
+        self.items.iter().filter(|item| matches!(item.kind, AssocKind::Type | AssocKind::OpaqueTy))
     }
 }
 

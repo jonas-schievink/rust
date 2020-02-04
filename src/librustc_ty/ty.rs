@@ -206,6 +206,10 @@ fn associated_item_def_ids(tcx: TyCtxt<'_>, def_id: DefId) -> &[DefId] {
     }
 }
 
+fn associated_items<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> ty::AssocItems<'tcx> {
+    ty::AssocItems::compute(tcx, def_id)
+}
+
 fn def_span(tcx: TyCtxt<'_>, def_id: DefId) -> Span {
     tcx.hir().span_if_local(def_id).unwrap()
 }

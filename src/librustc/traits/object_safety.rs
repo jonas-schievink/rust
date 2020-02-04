@@ -165,7 +165,7 @@ fn object_safety_violations_for_trait(
     // Check methods for violations.
     let mut violations: Vec<_> = tcx
         .associated_items(trait_def_id)
-        .filter(|item| item.kind == ty::AssocKind::Method)
+        .methods()
         .filter_map(|item| {
             object_safety_violation_for_method(tcx, trait_def_id, &item)
                 .map(|code| ObjectSafetyViolation::Method(item.ident.name, code, item.ident.span))
@@ -207,7 +207,7 @@ fn object_safety_violations_for_trait(
 
     violations.extend(
         tcx.associated_items(trait_def_id)
-            .filter(|item| item.kind == ty::AssocKind::Const)
+            .consts()
             .map(|item| ObjectSafetyViolation::AssocConst(item.ident.name, item.ident.span)),
     );
 
@@ -467,9 +467,10 @@ fn object_ty_for_trait<'tcx>(
 
     let mut associated_types = traits::supertraits(tcx, ty::Binder::dummy(trait_ref))
         .flat_map(|super_trait_ref| {
-            tcx.associated_items(super_trait_ref.def_id()).map(move |item| (super_trait_ref, item))
+            tcx.associated_items(super_trait_ref.def_id())
+                .concrete_types()
+                .map(move |item| (super_trait_ref, item))
         })
-        .filter(|(_, item)| item.kind == ty::AssocKind::Type)
         .collect::<Vec<_>>();
 
     // existential predicates need to be in a specific order

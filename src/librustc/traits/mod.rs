@@ -1064,9 +1064,7 @@ fn vtable_methods<'tcx>(
     debug!("vtable_methods({:?})", trait_ref);
 
     tcx.arena.alloc_from_iter(supertraits(tcx, trait_ref).flat_map(move |trait_ref| {
-        let trait_methods = tcx
-            .associated_items(trait_ref.def_id())
-            .filter(|item| item.kind == ty::AssocKind::Method);
+        let trait_methods = tcx.associated_items(trait_ref.def_id()).methods();
 
         // Now list each method's DefId and InternalSubsts (for within its trait).
         // If the method can never be called from this object, produce None.
