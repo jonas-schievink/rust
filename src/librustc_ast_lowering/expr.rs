@@ -7,6 +7,7 @@ use rustc_hir as hir;
 use rustc_hir::def::Res;
 use rustc_span::source_map::{respan, DesugaringKind, Span, Spanned};
 use rustc_span::symbol::{sym, Symbol};
+use rustc_span::DUMMY_SP;
 use syntax::ast::*;
 use syntax::attr;
 use syntax::ptr::P as AstP;
@@ -483,14 +484,42 @@ impl<'hir> LoweringContext<'_, 'hir> {
             Some(ty) => FunctionRetTy::Ty(ty),
             None => FunctionRetTy::Default(span),
         };
-        let ast_decl = FnDecl { inputs: vec![], output };
+
+        let task_context_id = self.resolver.next_node_id();
+        let task_context_hid = self.lower_node_id(task_context_id);
+        let ast_decl = FnDecl {
+            inputs: vec![Param {
+                attrs: AttrVec::new(),
+                ty: AstP(Ty {
+                    id: self.resolver.next_node_id(),
+                    kind: TyKind::Infer,
+                    span: DUMMY_SP,
+                }),
+                pat: AstP(Pat {
+                    id: task_context_id,
+                    kind: PatKind::Ident(
+                        BindingMode::ByValue(Mutability::Mut),
+                        Ident::with_dummy_span(sym::_task_context),
+                        None,
+                    ),
+                    span: DUMMY_SP,
+                }),
+                id: self.resolver.next_node_id(),
+                span: DUMMY_SP,
+                is_placeholder: false,
+            }],
+            output,
+        };
         let decl = self.lower_fn_decl(&ast_decl, None, /* impl trait allowed */ false, None);
         let body_id = self.lower_fn_body(&ast_decl, |this| {
             this.generator_kind = Some(hir::GeneratorKind::Async(async_gen_kind));
-            body(this)
+            this.task_context = Some(task_context_hid);
+            let res = body(this);
+            this.task_context = None;
+            res
         });
 
-        // `static || -> <ret_ty> { body }`:
+        // `static |task_context| -> <ret_ty> { body }`:
         let generator_kind = hir::ExprKind::Closure(
             capture_clause,
             decl,
@@ -523,9 +552,10 @@ impl<'hir> LoweringContext<'_, 'hir> {
     /// ```rust
     /// match <expr> {
     ///     mut pinned => loop {
-    ///         match ::std::future::poll_with_tls_context(unsafe {
-    ///             <::std::pin::Pin>::new_unchecked(&mut pinned)
-    ///         }) {
+    ///         match ::std::future::poll_with_context(
+    ///             unsafe { <::std::pin::Pin>::new_unchecked(&mut pinned) },
+    ///             task_context,
+    ///         ) {
     ///             ::std::task::Poll::Ready(result) => break result,
     ///             ::std::task::Poll::Pending => {}
     ///         }
@@ -561,12 +591,18 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let (pinned_pat, pinned_pat_hid) =
             self.pat_ident_binding_mode(span, pinned_ident, hir::BindingAnnotation::Mutable);
 
-        // ::std::future::poll_with_tls_context(unsafe {
-        //     ::std::pin::Pin::new_unchecked(&mut pinned)
-        // })`
-        let poll_expr = {
+        let task_context_ident = Ident::with_dummy_span(sym::_task_context);
+
+        // unsafe {
+        //     ::std::future::poll_with_context(
+        //         ::std::pin::Pin::new_unchecked(&mut pinned),
+        //         task_context,
+        //     )
+        // }
+        let poll_expr = if let Some(task_context_hid) = self.task_context {
             let pinned = self.expr_ident(span, pinned_ident, pinned_pat_hid);
             let ref_mut_pinned = self.expr_mut_addr_of(span, pinned);
+            let task_context = self.expr_ident_mut(span, task_context_ident, task_context_hid);
             let pin_ty_id = self.next_id();
             let new_unchecked_expr_kind = self.expr_call_std_assoc_fn(
                 pin_ty_id,
@@ -575,14 +611,16 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 "new_unchecked",
                 arena_vec![self; ref_mut_pinned],
             );
-            let new_unchecked =
-                self.arena.alloc(self.expr(span, new_unchecked_expr_kind, ThinVec::new()));
-            let unsafe_expr = self.expr_unsafe(new_unchecked);
-            self.expr_call_std_path(
+            let new_unchecked = self.expr(span, new_unchecked_expr_kind, ThinVec::new());
+            let call = self.expr_call_std_path(
                 gen_future_span,
-                &[sym::future, sym::poll_with_tls_context],
-                arena_vec![self; unsafe_expr],
-            )
+                &[sym::future, sym::poll_with_context],
+                arena_vec![self; new_unchecked, task_context],
+            );
+            self.arena.alloc(self.expr_unsafe(call))
+        } else {
+            // Use of `await` outside of an async context
+            self.arena.alloc(self.expr_err(span))
         };
 
         // `::std::task::Poll::Ready(result) => break result`
@@ -622,19 +660,28 @@ impl<'hir> LoweringContext<'_, 'hir> {
             self.stmt_expr(span, match_expr)
         };
 
-        let yield_stmt = {
+        let yield_stmt = if let Some(task_context_hid) = self.task_context {
             let unit = self.expr_unit(span);
-            let yield_expr = self.expr(
+            let yield_expr = self.arena.alloc(self.expr(
                 span,
                 hir::ExprKind::Yield(unit, hir::YieldSource::Await),
                 ThinVec::new(),
-            );
-            self.stmt_expr(span, yield_expr)
+            ));
+
+            let lhs = self.expr_ident(span, task_context_ident, task_context_hid);
+            let assign_expr =
+                self.expr(span, hir::ExprKind::Assign(lhs, yield_expr, span), AttrVec::new());
+
+            self.stmt_expr(span, assign_expr)
+        } else {
+            // Use of `await` outside of an async context
+            let err = self.expr_err(span);
+            self.stmt_expr(span, err)
         };
 
         let loop_block = self.block_all(span, arena_vec![self; inner_match_stmt, yield_stmt], None);
 
-        // loop { .. }
+        // loop { ...; task_context = yield (); }
         let loop_expr = self.arena.alloc(hir::Expr {
             hir_id: loop_hir_id,
             kind: hir::ExprKind::Loop(loop_block, None, hir::LoopSource::Loop),
