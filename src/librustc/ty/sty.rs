@@ -539,6 +539,9 @@ impl<'tcx> GeneratorSubsts<'tcx> {
     /// Generator has been poisoned.
     pub const POISONED: usize = 2;
 
+    /// Number of variants reserved in every generator.
+    pub const RESERVED_VARIANTS: usize = 3;
+
     const UNRESUMED_NAME: &'static str = "Unresumed";
     const RETURNED_NAME: &'static str = "Returned";
     const POISONED_NAME: &'static str = "Panicked";
