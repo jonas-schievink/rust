@@ -758,16 +758,14 @@ fn compute_layout<'tcx>(
         debug!("generator saved local {:?} => {:?}", GeneratorSavedLocal::from(idx), local);
     }
 
-    // Leave empty variants for the UNRESUMED, RETURNED, and POISONED states.
-    const RESERVED_VARIANTS: usize = 3;
-
     // Build the generator variant field list.
     // Create a map from local indices to generator struct indices.
     let mut variant_fields: IndexVec<VariantIdx, IndexVec<Field, GeneratorSavedLocal>> =
-        iter::repeat(IndexVec::new()).take(RESERVED_VARIANTS).collect();
+        iter::repeat(IndexVec::new()).take(GeneratorSubsts::RESERVED_VARIANTS).collect();
     let mut remap = FxHashMap::default();
     for (suspension_point_idx, live_locals) in live_locals_at_suspension_points.iter().enumerate() {
-        let variant_index = VariantIdx::from(RESERVED_VARIANTS + suspension_point_idx);
+        let variant_index =
+            VariantIdx::from(GeneratorSubsts::RESERVED_VARIANTS + suspension_point_idx);
         let mut fields = IndexVec::new();
         for (idx, saved_local) in live_locals.iter().enumerate() {
             fields.push(saved_local);
