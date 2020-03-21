@@ -14,6 +14,7 @@ Core encoding and decoding interfaces.
 #![feature(never_type)]
 #![feature(nll)]
 #![feature(associated_type_bounds)]
+#![feature(core_intrinsics)]
 #![cfg_attr(test, feature(test))]
 #![allow(rustc::internal)]
 
