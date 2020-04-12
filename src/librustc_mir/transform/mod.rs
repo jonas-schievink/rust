@@ -23,6 +23,7 @@ pub mod deaggregator;
 pub mod dump_mir;
 pub mod elaborate_drops;
 pub mod generator;
+pub mod infer_storage;
 pub mod inline;
 pub mod instcombine;
 pub mod no_landing_pads;
@@ -316,6 +317,7 @@ fn run_optimization_passes<'tcx>(
             &simplify::SimplifyCfg::new("final"),
             &simplify::SimplifyLocals,
             &add_call_guards::CriticalCallEdges,
+            &infer_storage::InferStorage,
             &dump_mir::Marker("PreCodegen"),
         ],
     );
