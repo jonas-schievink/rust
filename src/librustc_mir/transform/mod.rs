@@ -27,6 +27,7 @@ pub mod inline;
 pub mod instcombine;
 pub mod no_landing_pads;
 pub mod promote_consts;
+pub mod promote_copies;
 pub mod qualify_min_const_fn;
 pub mod remove_noop_landing_pads;
 pub mod rustc_peek;
@@ -300,6 +301,7 @@ fn run_optimization_passes<'tcx>(
             &uninhabited_enum_branching::UninhabitedEnumBranching,
             &simplify::SimplifyCfg::new("after-uninhabited-enum-branching"),
             &inline::Inline,
+            &promote_copies::PromoteCopies,
             // Lowering generator control-flow and variables
             // has to happen before we do anything else to them.
             &generator::StateTransform,
